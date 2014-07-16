@@ -74,8 +74,11 @@ void help(void);
 static int fps = 1;
 static int width = 640;
 static int height = 480;
+static int width_fov = 640;
+static int height_fov = 480;
 static int quality = 85;
 static int usestills = 0;
+static int fullfov = 0;
 static RASPICAM_CAMERA_PARAMETERS c_params;
 
 /** Struct used to pass information in encoder port userdata to callback
@@ -147,6 +150,7 @@ int input_init(input_parameter *param, int plugin_no)
 			{"vf", no_argument, 0, 0},
 			{"quality", required_argument, 0, 0},
 			{"usestills", no_argument, 0, 0},
+			{"fullfov", no_argument, 0, 0},
             {0, 0, 0, 0}
         };
 		
@@ -255,6 +259,10 @@ int input_init(input_parameter *param, int plugin_no)
 		case 24:
 			//use stills
 			usestills = 1;
+			break;
+		case 25:
+			//fullfov
+			fullfov = 1;
 			break;
         default:
             DBG("default case\n");
@@ -417,6 +425,11 @@ static void camera_control_callback(MMAL_PORT_T *port, MMAL_BUFFER_HEADER_T *buf
    mmal_buffer_header_release(buffer);
 }
 
+
+
+
+
+
 /******************************************************************************
 Description.: starts the worker thread and allocates memory
 Input Value.: -
@@ -424,7 +437,7 @@ Return Value: 0
 ******************************************************************************/
 int input_run(int id)
 {
-    pglobal->in[id].buf = malloc(width * height * 3);
+    pglobal->in[id].buf = malloc(width * height);
     if(pglobal->in[id].buf == NULL) {
         fprintf(stderr, "could not allocate memory\n");
         exit(EXIT_FAILURE);
@@ -487,6 +500,7 @@ void help(void)
 	" [-y | --height]....: height of frame capture, default 480 \n"\
 	" [-quality]....: set JPEG quality 0-100, default 85 \n"\
 	" [-usestills]....: uses stills mode instead of video mode \n"\
+	" [-fullfov]....: full field of view in video mode (limited to 15fps) \n"\
 	
 	" \n"\
 	" -sh : Set image sharpness (-100 to 100)\n"\
@@ -507,6 +521,68 @@ void help(void)
     " ---------------------------------------------------------------\n");
 	
 }
+
+
+
+
+MMAL_COMPONENT_T* CreateResizeComponentAndSetupPorts(int width, int height, MMAL_PORT_T* video_output_port, unsigned char do_argb_conversion)
+{
+	MMAL_COMPONENT_T *resizer = 0;
+	MMAL_ES_FORMAT_T *format;
+	MMAL_PORT_T *input_port = NULL, *output_port = NULL;
+	MMAL_STATUS_T status;
+	printf("OK0\n");
+	//create the camera component
+	status = mmal_component_create("vc.ril.resize", &resizer);
+	if (status != MMAL_SUCCESS)
+	{
+		printf("Failed to create reszie component\n");
+		goto error;
+	}
+	//check we have output ports
+	if (resizer->output_num != 1 || resizer->input_num != 1)
+	{
+		printf("Resizer doesn't have correct ports");
+		goto error;
+	}
+	//get the ports
+	input_port = resizer->input[0];
+	output_port = resizer->output[0];
+
+	mmal_format_copy(input_port->format,video_output_port->format);
+	input_port->buffer_num = 3;
+	status = mmal_port_format_commit(input_port);
+	if (status != MMAL_SUCCESS)
+	{
+		printf("Couldn't set resizer input port format : error %d", status);
+		goto error;
+	}
+	mmal_format_copy(output_port->format,input_port->format);
+	if(do_argb_conversion!=0)
+	{
+		output_port->format->encoding = MMAL_ENCODING_RGBA;
+		output_port->format->encoding_variant = MMAL_ENCODING_RGBA;
+	}
+	output_port->format->es->video.width = width;
+	output_port->format->es->video.height = height;
+	output_port->format->es->video.crop.x = 0;
+	output_port->format->es->video.crop.y = 0;
+	output_port->format->es->video.crop.width = width;
+	output_port->format->es->video.crop.height = height;
+	status = mmal_port_format_commit(output_port);
+	if (status != MMAL_SUCCESS)
+	{
+		printf("Couldn't set resizer output port format : error %d", status);
+		goto error;
+	}
+	return resizer;
+
+error:
+	if(resizer)
+		mmal_component_destroy(resizer);
+	return NULL;
+}
+
 
 /******************************************************************************
 Description.: setup mmal and callback
@@ -534,7 +610,10 @@ void *worker_thread(void *arg)
     MMAL_STATUS_T status;
     MMAL_PORT_T *camera_preview_port = NULL, *camera_video_port = NULL, *camera_still_port = NULL;
     MMAL_PORT_T *preview_input_port = NULL;
-
+   MMAL_COMPONENT_T* resizer = NULL;
+   MMAL_PORT_T * resizer_input_port = NULL;
+   MMAL_PORT_T * resizer_output_port = NULL;  
+   MMAL_CONNECTION_T *resizer_connection = 0;
     MMAL_CONNECTION_T *camera_preview_connection = 0;
 
 	//Encoder variables
@@ -588,7 +667,13 @@ void *worker_thread(void *arg)
        exit(EXIT_FAILURE);
    }
 	
-	
+	if(fullfov){
+		width_fov = width;
+		height_fov = height;
+		width = 2592;
+		height = 1944;
+		if(fps > 15) fps = 15;
+	}
 	{
         MMAL_PARAMETER_CAMERA_CONFIG_T cam_config = {
             { MMAL_PARAMETER_CAMERA_CONFIG, sizeof (cam_config)},
@@ -782,13 +867,27 @@ void *worker_thread(void *arg)
 
 	// Connect camera to preview (which might be a null_sink if no preview required)
 	status = connect_ports(camera_preview_port, preview_input_port, &camera_preview_connection);
+
+	if(fullfov){
+      		resizer = CreateResizeComponentAndSetupPorts(width_fov, height_fov, camera_video_port, 0);
+      		resizer_input_port  = resizer->input[0];
+      		resizer_output_port = resizer->output[0];
+	}
+
    
     // Now connect the camera to the encoder
 	if(usestills){
 		status = connect_ports(camera_still_port, encoder->input[0], &encoder_connection);
 	} else {
-		status = connect_ports(camera_video_port, encoder->input[0], &encoder_connection);
+		if(fullfov){
+			status = connect_ports(camera_video_port, resizer_input_port, &resizer_connection);
+			status = connect_ports(resizer_output_port, encoder->input[0], &encoder_connection);
+		}else{
+			status = connect_ports(camera_video_port, encoder->input[0], &encoder_connection);
+		}
 	}
+
+
 	
 	if (status)
    {
@@ -912,10 +1011,13 @@ void *worker_thread(void *arg)
       mmal_port_disable(encoder->output[0]);
 	
     mmal_connection_destroy(encoder_connection);
+    if(fullfov) mmal_connection_destroy(resizer_connection);
 	
 	// Disable components
     if (encoder)
          mmal_component_disable(encoder);
+    if (fullfov && resizer)
+         mmal_component_disable(resizer);
 		 
 	if (camera)
          mmal_component_disable(camera);
