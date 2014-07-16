@@ -34,7 +34,7 @@ APP_BINARY = mjpg_streamer
 # define the names and targets of the plugins
 PLUGINS = input_uvc.so
 PLUGINS += output_file.so
-#PLUGINS += output_udp.so
+PLUGINS += output_udp.so
 PLUGINS += output_http.so
 #PLUGINS += input_testpicture.so
 #PLUGINS += output_autofocus.so
@@ -46,7 +46,7 @@ PLUGINS += output_http.so
 # PLUGINS += input_ptp2.so # commented out because it depends on libgphoto
 #PLUGINS += input_http.so 
 # PLUGINS += output_viewer.so # commented out because it depends on SDL
-#PLUGINS += input_raspicam.so
+PLUGINS += input_raspicam.so
 
 # define the names of object files
 OBJECTS=mjpg_streamer.o utils.o
